@@ -1,5 +1,7 @@
 /* (C)2025 */
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.net.URI;
@@ -13,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -21,6 +24,7 @@ import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionKey;
@@ -32,20 +36,29 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdatePartitionSpec;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.data.BaseDeleteLoader;
+import org.apache.iceberg.data.DeleteLoader;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.data.parquet.GenericParquetReaders;
 import org.apache.iceberg.data.parquet.GenericParquetWriter;
+import org.apache.iceberg.deletes.BaseDVFileWriter;
+import org.apache.iceberg.deletes.DVFileWriter;
 import org.apache.iceberg.deletes.EqualityDeleteWriter;
 import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.deletes.PositionDeleteWriter;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Term;
 import org.apache.iceberg.hadoop.HadoopCatalog;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.io.FileWriterFactory;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.parquet.column.ParquetProperties;
 
@@ -87,7 +100,11 @@ public class IcebergTableGenerator {
         return this;
     }
 
-    public Table getTable() {
+    public void updateTablePropertiesToV3() {
+    table.updateProperties()
+        .set("format-version", "3")
+        .commit();
+  }public Table getTable() {
         return table;
     }
 
@@ -98,6 +115,33 @@ public class IcebergTableGenerator {
         update.commit();
 
         return this;
+    }
+
+    public <T> IcebergTableGenerator appendWithRowDelta(
+            List<T> partitionValues,
+            RecordGenerator<T> recordGenerator,
+            int dataFilesPerPartition,
+            int rowsPerDataFile,
+            RowDelta rowDeltaInProgress,
+            boolean commit) throws IOException {
+      Preconditions.checkState(table != null, "create must be called first");
+      URI dataDir = getDataDirectory(id);
+      RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+
+      for (T value : partitionValues) {
+        URI partitionDir = dataDir.resolve(value.toString() + "/");
+        for (int fileNum = 0; fileNum < dataFilesPerPartition; fileNum++) {
+          OutputFile parquetFile =
+              getUniqueNumberedFilename(
+                  partitionDir.resolve(value + "-%02d.parquet").toString());
+          rowDelta.addRows(
+              writeDataFile(parquetFile, value, recordGenerator, rowsPerDataFile));
+        }
+      }
+      if (commit) {
+        rowDelta.commit();
+      }
+      return this;
     }
 
     public <T> IcebergTableGenerator append(
@@ -176,20 +220,73 @@ public class IcebergTableGenerator {
 
     public IcebergTableGenerator positionalDelete(Predicate<Record> deletePredicate)
             throws IOException {
-        return positionalDelete(null, deletePredicate, 0, 0, null);
+        return positionalDelete(null, deletePredicate, 0, 0, null, null, null);
     }
+
+  public IcebergTableGenerator deleteVectors(String specificDataFilePath)
+      throws IOException {
+    Expression expr = Expressions.alwaysTrue();
+    CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
+
+    RowDelta rowDelta = getTransaction().newRowDelta();
+    Map<PartitionKey, List<FileScanTask>> orderedTasks =
+        orderFileScanTasksByPartitionAndPath(scanTasks);
+    for (FileScanTask task : scanTasks) {
+      String path = task.file().path().toString();
+      // Skip if not the specified file (when path is provided)
+      if (specificDataFilePath != null && !path.equals(specificDataFilePath)) {
+        continue;
+      }
+
+      PartitionKey key = getPartitionKey(task);
+      OutputFileFactory fileFactory =
+          OutputFileFactory.builderFor(table, 100, 1).format(FileFormat.PUFFIN).build();
+      BaseDVFileWriter dvWriter =
+          new BaseDVFileWriter(fileFactory, new PreviousDeleteLoader(table, ImmutableMap.of()));
+
+      // write deletes for the data file
+      dvWriter.delete(path, 0L, table.spec(), key);
+      dvWriter.delete(path, 5L, table.spec(), key);
+      dvWriter.delete(path, 8L, table.spec(), key);
+      dvWriter.close();
+      DeleteWriteResult res = dvWriter.result();
+      List<DeleteFile> deleteFiles = res.deleteFiles();
+      for (DeleteFile deleteFile : deleteFiles) {
+        rowDelta.addDeletes(deleteFile);
+      }
+    }
+    rowDelta.commit();
+    return this;
+  }
+
+  public IcebergTableGenerator positionalDelete(Predicate<Record> deletePredicate, String specificDataFilePath)
+      throws IOException {
+    return positionalDelete(null, deletePredicate, 0, 0, null, specificDataFilePath, null);
+  }
+
+  public <T> IcebergTableGenerator positionalDelete(
+      List<T> partitionValues, Predicate<Record> deletePredicate, String specificDataFilePath) throws IOException {
+    return positionalDelete(partitionValues, deletePredicate, 0, 0, null, specificDataFilePath, null);
+  }
 
     public <T> IcebergTableGenerator positionalDelete(
             List<T> partitionValues, Predicate<Record> deletePredicate) throws IOException {
-        return positionalDelete(partitionValues, deletePredicate, 0, 0, null);
+        return positionalDelete(partitionValues, deletePredicate, 0, 0, null, null, null);
     }
+
+  public <T> IcebergTableGenerator positionalDelete(
+      List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDelta) throws IOException {
+    return positionalDelete(partitionValues, deletePredicate, 0, 0, null, null, rowDelta);
+  }
 
     public <T> IcebergTableGenerator positionalDelete(
             List<T> partitionValues,
             Predicate<Record> deletePredicate,
             int extraDataFileCountPerPartition,
             int extraDeleteCountPerDataFile,
-            GenericRecord fakeRecord)
+            GenericRecord fakeRecord,
+            String specificDataFilePath,
+            RowDelta rowDeltaInProgress)
             throws IOException {
         URI dataDir = getDataDirectory(id);
         Expression expr =
@@ -199,7 +296,7 @@ public class IcebergTableGenerator {
                         : Expressions.alwaysTrue();
         CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-        RowDelta rowDelta = getTransaction().newRowDelta();
+        RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
         Map<PartitionKey, List<FileScanTask>> orderedTasks =
                 orderFileScanTasksByPartitionAndPath(scanTasks);
@@ -224,7 +321,14 @@ public class IcebergTableGenerator {
             Set<String> realDataFiles =
                     orderedTasks.get(key).stream()
                             .map(t -> t.file().location())
-                            .collect(Collectors.toSet());
+                            .filter(path -> specificDataFilePath == null || path.equals(specificDataFilePath))
+              .collect(Collectors.toSet());
+
+      // Skip if no matching files in this partition
+      if (realDataFiles.isEmpty()) {
+        continue;
+      }
+
             List<String> dataFiles = new ArrayList<>(realDataFiles);
             for (int i = 0; i < extraDataFileCountPerPartition; i++) {
                 String fakePath =
@@ -256,42 +360,50 @@ public class IcebergTableGenerator {
                                                                 table.schema(), fileSchema))
                                         .build()) {
 
-                            int pos = 0;
-                            for (Record record : reader) {
-                                if (deletePredicate.test(record)) {
-                                    PositionDelete<Record> delete = PositionDelete.create();
-                                    delete.set(path, pos, record);
-                                    writer.write(delete);
-                                }
-                                pos++;
-                            }
-                        }
-                    } else {
-                        for (int i = 0, pos = 0;
-                                i < extraDeleteCountPerDataFile;
-                                i++, pos += generator.intRange(1, 100)) {
-                            PositionDelete<Record> delete = PositionDelete.create();
-                            delete.set(path, pos, fakeRecord);
-                            writer.write(delete);
-                        }
-                    }
+              int pos = 0;
+              for (Record record : reader) {
+                if (deletePredicate.test(record)) {
+                  PositionDelete<Record> posDel = PositionDelete.create();
+                  posDel.set(path, pos, record);
+                  writer.write(posDel);
                 }
+                pos++;
+              }
             }
+          } else {
+            for (int i = 0, pos = 0;
+                i < extraDeleteCountPerDataFile;
+                i++, pos += generator.intRange(1, 100)) {
+              PositionDelete<Record> posDel = PositionDelete.create();
+              posDel.set(path, pos);
+              writer.write(posDel);
+            }
+          }
+        }
+      }
 
             rowDelta.addDeletes(deleteWriter.toDeleteFile());
-        }
+      }
 
+      if (rowDeltaInProgress == null)  {
         rowDelta.commit();
-        return this;
+      }
+      return this;
     }
 
     public IcebergTableGenerator equalityDelete(
             Predicate<Record> deletePredicate, List<Integer> equalityIds) throws IOException {
-        return equalityDelete(null, deletePredicate, equalityIds);
+        return equalityDelete(null, deletePredicate, equalityIds, null);
     }
 
+  public <T> IcebergTableGenerator equalityDelete(
+      List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds)
+      throws IOException {
+      return equalityDelete(partitionValues, deletePredicate, equalityIds, null);
+  }
+
     public <T> IcebergTableGenerator equalityDelete(
-            List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds)
+            List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds, RowDelta rowDeltaInProgress)
             throws IOException {
         URI dataDir = getDataDirectory(id);
         Expression expr =
@@ -301,7 +413,7 @@ public class IcebergTableGenerator {
                         : Expressions.alwaysTrue();
         CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-        RowDelta rowDelta = getTransaction().newRowDelta();
+        RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
         Map<PartitionKey, List<FileScanTask>> orderedTasks =
                 orderFileScanTasksByPartitionAndPath(scanTasks);
@@ -348,18 +460,21 @@ public class IcebergTableGenerator {
                                                             table.schema(), fileSchema))
                                     .build()) {
 
-                        for (Record record : reader) {
-                            if (deletePredicate.test(record)) {
-                                writer.write(record);
-                            }
-                        }
-                    }
-                }
+            for (Record record : reader) {
+              if (deletePredicate.test(record)) {
+                writer.write(record);
+              }
             }
+          }
+        }
+      }
 
             rowDelta.addDeletes(deleteWriter.toDeleteFile());
         }
 
+        /*if (rowDeltaInProgress == null)  {
+          rowDelta.commit();
+        }*/
         rowDelta.commit();
         return this;
     }
@@ -399,7 +514,6 @@ public class IcebergTableGenerator {
             throws IOException {
         try (FileAppender<GenericRecord> appender =
                 Parquet.write(parquetFile)
-                        .writerVersion(ParquetProperties.WriterVersion.PARQUET_1_0)
                         .schema(table.schema())
                         .createWriterFunc(GenericParquetWriter::buildWriter)
                         .setAll(table.properties())
@@ -428,7 +542,6 @@ public class IcebergTableGenerator {
             throws IOException {
         try (FileAppender<GenericRecord> appender =
                 Parquet.write(parquetFile)
-                        .writerVersion(ParquetProperties.WriterVersion.PARQUET_1_0)
                         .schema(table.schema())
                         .createWriterFunc(GenericParquetWriter::buildWriter)
                         .setAll(table.properties())
@@ -483,4 +596,24 @@ public class IcebergTableGenerator {
 
         return builder.toString();
     }
+
+
+  private static class PreviousDeleteLoader implements Function<String, PositionDeleteIndex> {
+    private final Map<String, DeleteFile> deleteFiles;
+    private final DeleteLoader deleteLoader;
+
+    PreviousDeleteLoader(Table table, Map<String, DeleteFile> deleteFiles) {
+      this.deleteFiles = deleteFiles;
+      this.deleteLoader = new BaseDeleteLoader(deleteFile -> table.io().newInputFile(deleteFile));
+    }
+
+    @Override
+    public PositionDeleteIndex apply(String path) {
+      DeleteFile deleteFile = deleteFiles.get(path);
+      if (deleteFile == null) {
+        return null;
+      }
+      return deleteLoader.loadPositionDeletes(ImmutableList.of(deleteFile), path);
+    }
+  }
 }
