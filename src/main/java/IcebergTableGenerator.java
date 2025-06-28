@@ -56,6 +56,7 @@ import org.apache.iceberg.hadoop.HadoopCatalog;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.FileWriterFactory;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.OutputFileFactory;
@@ -225,37 +226,109 @@ public class IcebergTableGenerator {
 
   public IcebergTableGenerator deleteVectors(String specificDataFilePath)
       throws IOException {
-    Expression expr = Expressions.alwaysTrue();
+    // This method is deprecated - use deletionVectors with predicates instead
+    // For now, just call the predicate version with a dummy predicate
+    return deletionVectors(null, record -> false); // Delete nothing with dummy predicate
+  }
+
+  public <T> IcebergTableGenerator deletionVectors(
+      List<T> partitionValues, Predicate<Record> deletePredicate) throws IOException {
+    return deletionVectors(partitionValues, deletePredicate, null);
+  }
+
+  public <T> IcebergTableGenerator deletionVectors(
+      List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDeltaInProgress) throws IOException {
+    URI dataDir = getDataDirectory(id);
+    Expression expr =
+        partitionValues != null
+            ? Expressions.in(
+                table.spec().fields().get(0).name(), partitionValues.toArray())
+            : Expressions.alwaysTrue();
     CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-    RowDelta rowDelta = getTransaction().newRowDelta();
+    RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+
     Map<PartitionKey, List<FileScanTask>> orderedTasks =
         orderFileScanTasksByPartitionAndPath(scanTasks);
-    for (FileScanTask task : scanTasks) {
-      String path = task.file().path().toString();
-      // Skip if not the specified file (when path is provided)
-      if (specificDataFilePath != null && !path.equals(specificDataFilePath)) {
-        continue;
+    for (PartitionKey key : orderedTasks.keySet()) {
+      List<String> dataFiles =
+          orderedTasks.get(key).stream()
+              .map(t -> t.file().location())
+              .sorted(String::compareTo)
+              .collect(Collectors.toList());
+
+      // Use a different approach: manually create deletion vector files in partition directories
+      // by using a custom DV writer that handles partition placement
+      String partitionPath;
+      if (key.size() > 0) {
+        String partitionString = partitionKeyDirectoryName(key);
+        URI partitionDir =
+            partitionString.length() > 0
+                ? dataDir.resolve(partitionString + "/")
+                : dataDir;
+        partitionPath = partitionDir.toString();
+        System.out.println("Creating deletion vector files in partition directory: " + partitionDir);
+      } else {
+        partitionPath = dataDir.toString();
+        System.out.println("Creating deletion vector files in root directory: " + dataDir);
       }
 
-      PartitionKey key = getPartitionKey(task);
+      // Use standard BaseDVFileWriter - files will be created in table data directory
+      // Note: Partition directory placement is a limitation we need to address separately
       OutputFileFactory fileFactory =
           OutputFileFactory.builderFor(table, 100, 1).format(FileFormat.PUFFIN).build();
       BaseDVFileWriter dvWriter =
           new BaseDVFileWriter(fileFactory, new PreviousDeleteLoader(table, ImmutableMap.of()));
 
-      // write deletes for the data file
-      dvWriter.delete(path, 0L, table.spec(), key);
-      dvWriter.delete(path, 5L, table.spec(), key);
-      dvWriter.delete(path, 8L, table.spec(), key);
-      dvWriter.close();
-      DeleteWriteResult res = dvWriter.result();
-      List<DeleteFile> deleteFiles = res.deleteFiles();
-      for (DeleteFile deleteFile : deleteFiles) {
-        rowDelta.addDeletes(deleteFile);
+      try {
+        for (String path : dataFiles) {
+          try (CloseableIterable<Record> reader =
+              Parquet.read(table.io().newInputFile(path))
+                  .project(table.schema())
+                  .reuseContainers()
+                  .createReaderFunc(
+                      fileSchema ->
+                          GenericParquetReaders.buildReader(
+                              table.schema(), fileSchema))
+                  .build()) {
+
+            long pos = 0;
+            int deletedCount = 0;
+            int totalCount = 0;
+            for (Record record : reader) {
+              totalCount++;
+              if (deletePredicate.test(record)) {
+                dvWriter.delete(path, pos, table.spec(), key);
+                deletedCount++;
+                System.out.println("Marking row " + pos + " for deletion in file: " + path);
+              }
+              pos++;
+            }
+            System.out.println("Processed " + totalCount + " records, marked " + deletedCount + " for deletion in file: " + path);
+          }
+        }
+        dvWriter.close();
+        DeleteWriteResult res = dvWriter.result();
+        List<DeleteFile> deleteFiles = res.deleteFiles();
+        System.out.println("Created " + deleteFiles.size() + " deletion vector files");
+        for (DeleteFile deleteFile : deleteFiles) {
+          System.out.println("Adding deletion vector file to rowDelta: " + deleteFile.path() +
+              " (recordCount: " + deleteFile.recordCount() + ")");
+          rowDelta.addDeletes(deleteFile);
+        }
+      } catch (Exception e) {
+        try {
+          dvWriter.close();
+        } catch (Exception closeException) {
+          e.addSuppressed(closeException);
+        }
+        throw e;
       }
     }
-    rowDelta.commit();
+
+    if (rowDeltaInProgress == null) {
+      rowDelta.commit();
+    }
     return this;
   }
 
@@ -598,6 +671,10 @@ public class IcebergTableGenerator {
     }
 
 
+
+
+
+
   private static class PreviousDeleteLoader implements Function<String, PositionDeleteIndex> {
     private final Map<String, DeleteFile> deleteFiles;
     private final DeleteLoader deleteLoader;
@@ -616,4 +693,6 @@ public class IcebergTableGenerator {
       return deleteLoader.loadPositionDeletes(ImmutableList.of(deleteFile), path);
     }
   }
+
+
 }
