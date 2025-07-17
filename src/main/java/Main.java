@@ -13,21 +13,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.expressions.Expressions;
-import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.Types;
 
 public class Main {
@@ -45,8 +41,8 @@ public class Main {
     private Configuration conf;
 
     private static final Schema IDS_SCHEMA =
-      new Schema(
-          Types.NestedField.required(1, "id", Types.IntegerType.get()));private static final Schema ORDERS_SCHEMA =
+            new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get()));
+    private static final Schema ORDERS_SCHEMA =
             new Schema(
                     Types.NestedField.required(1, "order_id", Types.IntegerType.get()),
                     Types.NestedField.required(2, "order_year", Types.IntegerType.get()),
@@ -82,27 +78,34 @@ public class Main {
                     "gray");
 
     private static final int WIDE_METRICS_N_COLS = 1000;
-    private static final Schema WIDE_METRICS_SCHEMA = new Schema(
-        Stream
-            .iterate(0, i -> i + 1)
-            .limit(WIDE_METRICS_N_COLS)
-            .map(i -> i == 0 ? Types.NestedField.required(i + 1, "id", Types.IntegerType.get()) : Types.NestedField.required(i + 1, "metric_" + (i - 1), Types.DoubleType.get()))
-            .collect(Collectors.toList()));
+    private static final Schema WIDE_METRICS_SCHEMA =
+            new Schema(
+                    Stream.iterate(0, i -> i + 1)
+                            .limit(WIDE_METRICS_N_COLS)
+                            .map(
+                                    i ->
+                                            i == 0
+                                                    ? Types.NestedField.required(
+                                                            i + 1, "id", Types.IntegerType.get())
+                                                    : Types.NestedField.required(
+                                                            i + 1,
+                                                            "metric_" + (i - 1),
+                                                            Types.DoubleType.get()))
+                            .collect(Collectors.toList()));
 
+    private static final Map<String, String> MERGE_ON_READ_MAP;
 
-  private static final Map<String, String> MERGE_ON_READ_MAP;
+    static {
+        MERGE_ON_READ_MAP = new HashMap<>();
+        MERGE_ON_READ_MAP.put("write.delete.mode", "merge-on-read");
+        MERGE_ON_READ_MAP.put("write.update.mode", "merge-on-read");
+        MERGE_ON_READ_MAP.put("write.merge.mode", "merge-on-read");
+    }
 
-  static {
-    MERGE_ON_READ_MAP = new HashMap<>();
-    MERGE_ON_READ_MAP.put("write.delete.mode", "merge-on-read");
-    MERGE_ON_READ_MAP.put("write.update.mode", "merge-on-read");
-    MERGE_ON_READ_MAP.put("write.merge.mode", "merge-on-read");
-  }
-
-  public static void main(String[] args) {
-    try {
-      Main main = new Main();
-      JCommander.newBuilder().addObject(main).build().parse(args);
+    public static void main(String[] args) {
+        try {
+            Main main = new Main();
+            JCommander.newBuilder().addObject(main).build().parse(args);
 
             main.initHadoopConfFromArgs();
             main.run();
@@ -132,76 +135,93 @@ public class Main {
         }
     }
 
-  private void run() throws IOException {
-    /*createSmallOrders();
-    createSmallOrdersWithDeletes();
-    //createMultiRowGroupOrdersWithDeletes();
-    //createMultiRowGroupOrdersWithDeletesCopyA();
-    createMultiRowGroupOrdersWithDeletesCopyB();
-    createUnpartitionedOrdersWithDeletes();
-    createProductsWithEqDeletes();
-    createMergeOnReadTargetPartitioned();
-    createMergeOnReadTargetUnpartitioned();
-    createMergeOnReadSource();*/
-    //createDvs();
-    //createProductsWithEqDeletesAndPosDeletesSameSequenceNumber();
-    //createProductsWithEqDeletesAndOverlappingPosDeletes();
-    //createProductsWithDeletionVectorsOnly();
-    //createProductsWithDeletionVectorsAndEqualityDeletes();
-    //createProductsWithDeletionVectorsAndV2PositionDeletes();
-    createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes();
+    private void run() throws IOException {
+        /*createSmallOrders();
+        createSmallOrdersWithDeletes();
+        //createMultiRowGroupOrdersWithDeletes();
+        //createMultiRowGroupOrdersWithDeletesCopyA();
+        createMultiRowGroupOrdersWithDeletesCopyB();
+        createUnpartitionedOrdersWithDeletes();
+        createProductsWithEqDeletes();
+        createMergeOnReadTargetPartitioned();
+        createMergeOnReadTargetUnpartitioned();
+        createMergeOnReadSource();*/
+        // createDvs();
+        // createProductsWithEqDeletesAndPosDeletesSameSequenceNumber();
+        // createProductsWithEqDeletesAndOverlappingPosDeletes();
+        createProductsWithDeletionVectorsOnly();
+        createProductsWithDeletionVectorsAndEqualityDeletes();
+        createProductsWithDeletionVectorsAndV2PositionDeletes();
+        createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes();
 
-    //createProductsWithEqDeletes();
-    //createWideMetrics();
+        // Test the new partition-aware deletion vectors method
+        // testPartitionAwareDeletionVectors();
+
+        // createProductsWithEqDeletes();
+        // createWideMetrics();
 
         //    createProductsWithEqDeletesSchemaChange();
         //    createSmallOrdersWithLargeDeleteFile();
         //    createSmallOrdersWithPartitionEvolution();
 
-    //createMultiRowGroupOrdersWithDeletes();
-    //createMultiRowGroupOrdersWithDeletesCopyA();
+        // createMultiRowGroupOrdersWithDeletes();
+        // createMultiRowGroupOrdersWithDeletesCopyA();
     }
 
-  private void createMergeOnReadTargetPartitioned() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("Merge_On_Read_Target_Partitioned"));
-    tableGenerator
-        .create(ORDERS_SCHEMA, PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(), MERGE_ON_READ_MAP)
-        .append(ImmutableList.of(2024), this::generateOrdersRecord, 1, 100000)
-        .commit();
-  }
+    private void createMergeOnReadTargetPartitioned() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("Merge_On_Read_Target_Partitioned"));
+        tableGenerator
+                .create(
+                        ORDERS_SCHEMA,
+                        PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
+                        MERGE_ON_READ_MAP)
+                .append(ImmutableList.of(2024), this::generateOrdersRecord, 1, 100000)
+                .commit();
+    }
 
-  private void createMergeOnReadTargetUnpartitioned() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("Merge_On_Read_Target_Unpartitioned"));
-    tableGenerator
-        .create(ORDERS_SCHEMA, PartitionSpec.unpartitioned(), MERGE_ON_READ_MAP)
-        .append(this::generateUnpartitionedOrdersRecord, 1, 100000)
-        .commit();
-  }
+    private void createMergeOnReadTargetUnpartitioned() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("Merge_On_Read_Target_Unpartitioned"));
+        tableGenerator
+                .create(ORDERS_SCHEMA, PartitionSpec.unpartitioned(), MERGE_ON_READ_MAP)
+                .append(this::generateUnpartitionedOrdersRecord, 1, 100000)
+                .commit();
+    }
 
-  private void createMergeOnReadSource() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("Merge_On_Read_Source_Partitioned"));
-    tableGenerator
-        .create(
-            ORDERS_SCHEMA, PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(), MERGE_ON_READ_MAP)
-        .append(ImmutableList.of(2020), this::generateOrdersRecord, 1, 100000)
-        .commit();
-  }
+    private void createMergeOnReadSource() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("Merge_On_Read_Source_Partitioned"));
+        tableGenerator
+                .create(
+                        ORDERS_SCHEMA,
+                        PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
+                        MERGE_ON_READ_MAP)
+                .append(ImmutableList.of(2020), this::generateOrdersRecord, 1, 100000)
+                .commit();
+    }
 
-  private void createSmallOrders() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("orders"));
-    tableGenerator
-        .create(
-            ORDERS_SCHEMA, PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build())
-        .append(ImmutableList.of(2019, 2020), this::generateOrdersRecord, 2, 100)
-        .commit()
-        .append(ImmutableList.of(2021), this::generateOrdersRecord, 2, 100)
-        .commit();
-  }
+    private void createSmallOrders() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("orders"));
+        tableGenerator
+                .create(
+                        ORDERS_SCHEMA,
+                        PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build())
+                .append(ImmutableList.of(2019, 2020), this::generateOrdersRecord, 2, 100)
+                .commit()
+                .append(ImmutableList.of(2021), this::generateOrdersRecord, 2, 100)
+                .commit();
+    }
 
     private void createSmallOrdersWithDeletes() throws IOException {
         IcebergTableGenerator tableGenerator =
@@ -229,85 +249,6 @@ public class Main {
                 .positionalDelete(ImmutableList.of(2021), r -> r.get(0, Integer.class) % 10 == 6)
                 .commit();
     }
-
-  private void createDvs() throws IOException {
-    // Create a properties map with format version 3
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put(TableProperties.FORMAT_VERSION, "2");
-
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("dvfoo"));
-
-
-    // Create table and add initial data
-    tableGenerator
-        .create(
-            IDS_SCHEMA, PartitionSpec.unpartitioned(), tableProperties)
-        .append(((generator, unused) -> generateIdsRecord(generator)), 1, 10)
-        .commit();
-
-
-    // Get the table
-    Table table = tableGenerator.getTable();
-
-    // Find a specific data file to target
-    String targetDataFilePath = null;
-    CloseableIterable<FileScanTask> scanTasks = table.newScan().planFiles();
-
-    /*
-    for (FileScanTask task : scanTasks) {
-      targetDataFilePath = task.file().path().toString();
-      break; // Just get the first one
-    }
-
-    if (targetDataFilePath != null) {
-      System.out.println("Creating positional deletes for file: " + targetDataFilePath);
-
-      // Create positional deletes only for the specific file
-      tableGenerator
-          .positionalDelete(r -> r.get(0, Integer.class)  < 400, targetDataFilePath)
-          .commit();
-
-    } else {
-      System.out.println("No data files found to create deletes");
-    }*/
-
-
-    // Add more data and capture the data file path
-    String capturedDataFilePath = null;
-
-    // Append new data
-    tableGenerator
-        .append(((generator, unused) -> generateIdsRecord(generator)), 1, 10)
-        .commit();
-
-    tableGenerator.updateTablePropertiesToV3();
-
-    /*Table table = tableGenerator.getTable();
-    // Find the most recently added data file
-    CloseableIterable<FileScanTask> scanTasks;*/
-
-
-    scanTasks = table.newScan().planFiles();
-    for (FileScanTask task : scanTasks) {
-      // Get the most recent data file (you could add more logic to select a specific one)
-      capturedDataFilePath = task.file().path().toString();
-      if (capturedDataFilePath.contains("01")) {
-        break;
-      }
-      // Just get the last one in the iteration
-    }
-
-
-    if (capturedDataFilePath != null) {
-      System.out.println("Creating delete vectors for file: " + capturedDataFilePath);
-      tableGenerator
-          .deleteVectors(capturedDataFilePath)
-          .commit();
-    } else {
-      System.out.println("No data files found to create delete vectors");
-    }
-  }
 
     private void createMultiRowGroupOrdersWithDeletes() throws IOException {
         IcebergTableGenerator tableGenerator =
@@ -341,57 +282,69 @@ public class Main {
                 .commit();
     }
 
-  private void createMultiRowGroupOrdersWithDeletesCopyA() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("multi_rowgroup_orders_with_deletes_copy_A"));
-    tableGenerator
-        .create(
-            ORDERS_SCHEMA,
-            PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
-            ImmutableMap.of(
-                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(16 * 1024),
-                TableProperties.PARQUET_PAGE_SIZE_BYTES, Integer.toString(4 * 1024),
-                TableProperties.PARQUET_DICT_SIZE_BYTES, Integer.toString(4 * 1024)))
-        .append(ImmutableList.of(2019, 2020, 2021), this::generateOrdersRecord, 3, 1000)
-        .commit()
-        .positionalDelete(ImmutableList.of(2021), r -> r.get(0, Integer.class) % 10 < 3)
-        .commit()
-        .positionalDelete(
-            ImmutableList.of(2021),
-            r -> r.get(0, Integer.class) % 10 > 0 && r.get(0, Integer.class) % 100 == 5)
-        .commit()
-        .positionalDelete(
-            ImmutableList.of(2020, 2021),
-            r -> r.get(0, Integer.class) % 3000 >= 700 && r.get(0, Integer.class) % 3000 < 1200)
-        .commit();
-  }
+    private void createMultiRowGroupOrdersWithDeletesCopyA() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("multi_rowgroup_orders_with_deletes_copy_A"));
+        tableGenerator
+                .create(
+                        ORDERS_SCHEMA,
+                        PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
+                        ImmutableMap.of(
+                                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
+                                        Integer.toString(16 * 1024),
+                                TableProperties.PARQUET_PAGE_SIZE_BYTES, Integer.toString(4 * 1024),
+                                TableProperties.PARQUET_DICT_SIZE_BYTES,
+                                        Integer.toString(4 * 1024)))
+                .append(ImmutableList.of(2019, 2020, 2021), this::generateOrdersRecord, 3, 1000)
+                .commit()
+                .positionalDelete(ImmutableList.of(2021), r -> r.get(0, Integer.class) % 10 < 3)
+                .commit()
+                .positionalDelete(
+                        ImmutableList.of(2021),
+                        r -> r.get(0, Integer.class) % 10 > 0 && r.get(0, Integer.class) % 100 == 5)
+                .commit()
+                .positionalDelete(
+                        ImmutableList.of(2020, 2021),
+                        r ->
+                                r.get(0, Integer.class) % 3000 >= 700
+                                        && r.get(0, Integer.class) % 3000 < 1200)
+                .commit();
+    }
 
-  private void createMultiRowGroupOrdersWithDeletesCopyB() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("multi_rowgroup_orders_with_deletes_copy_B"));
-    tableGenerator
-        .create(
-            ORDERS_SCHEMA,
-            PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
-            ImmutableMap.of(
-                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(16 * 1024),
-                TableProperties.PARQUET_PAGE_SIZE_BYTES, Integer.toString(4 * 1024),
-                TableProperties.PARQUET_DICT_SIZE_BYTES, Integer.toString(4 * 1024)))
-        .append(ImmutableList.of(2019, 2020, 2021), this::generateOrdersRecord, 3, 1000)
-        .commit()
-        .positionalDelete(ImmutableList.of(2021), r -> r.get(0, Integer.class) % 10 < 3)
-        .commit()
-        .positionalDelete(
-            ImmutableList.of(2021),
-            r -> r.get(0, Integer.class) % 10 > 0 && r.get(0, Integer.class) % 100 == 5)
-        .commit()
-        .positionalDelete(
-            ImmutableList.of(2020, 2021),
-            r -> r.get(0, Integer.class) % 3000 >= 700 && r.get(0, Integer.class) % 3000 < 1200)
-        .commit();
-  }
+    private void createMultiRowGroupOrdersWithDeletesCopyB() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("multi_rowgroup_orders_with_deletes_copy_B"));
+        tableGenerator
+                .create(
+                        ORDERS_SCHEMA,
+                        PartitionSpec.builderFor(ORDERS_SCHEMA).identity("order_year").build(),
+                        ImmutableMap.of(
+                                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
+                                        Integer.toString(16 * 1024),
+                                TableProperties.PARQUET_PAGE_SIZE_BYTES, Integer.toString(4 * 1024),
+                                TableProperties.PARQUET_DICT_SIZE_BYTES,
+                                        Integer.toString(4 * 1024)))
+                .append(ImmutableList.of(2019, 2020, 2021), this::generateOrdersRecord, 3, 1000)
+                .commit()
+                .positionalDelete(ImmutableList.of(2021), r -> r.get(0, Integer.class) % 10 < 3)
+                .commit()
+                .positionalDelete(
+                        ImmutableList.of(2021),
+                        r -> r.get(0, Integer.class) % 10 > 0 && r.get(0, Integer.class) % 100 == 5)
+                .commit()
+                .positionalDelete(
+                        ImmutableList.of(2020, 2021),
+                        r ->
+                                r.get(0, Integer.class) % 3000 >= 700
+                                        && r.get(0, Integer.class) % 3000 < 1200)
+                .commit();
+    }
 
     private void createOrdersFullRowgroupDelete() throws IOException {
         IcebergTableGenerator tableGenerator =
@@ -452,8 +405,8 @@ public class Main {
                         10000,
                         10000,
                         getFakeOrdersRecordForExtraDeletes(),
-                    null,
-                    null);
+                        null,
+                        null);
     }
 
     private void createSmallOrdersWithPartitionEvolution() throws IOException {
@@ -592,99 +545,110 @@ public class Main {
                 .commit();
     }
 
+    /**
+     * Creates a 'products_with_eq_deletes' table with 3 partitions on the category column: widget,
+     * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
+     * gadget. Each data file has two row groups, each with 100 rows.
+     *
+     * <p>
+     *
+     * <p>Creation steps:
+     *
+     * <p>
+     *
+     * <pre>
+     * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
+     * 2. Delete product_ids [ 25 .. 39 via positional delete                               Total rows: 185
+     * 3. Delete product_ids [ 0 .. 29 ] via equality delete on product_id. (5 Overlapping) Total rows: 160
+     * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
+     * 4. Delete all products with color 'green' via equality delete on color.              Total rows: 323
+     * 5. Insert 600 rows, 200 each in categories 'widget', 'gizmo', 'gadget' with          Total rows: 923
+     *    product_ids [ 400 .. 999]
+     * 7. Delete product_ids [ 75 .. 124 ] via positional delete.                           Total rows: 879
+     *....(2 overlapping from 100-125 from color deletion from earlier)
+     *    (3 overlapping from 75-99 from color deletion from earlier)
+     * 6. Delete product_ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ],                Total rows: 398
+     *    [ 700 .. 799 ], [ 900 .. 999 ] via equality delete on product_id.
+     *    (25 overlapping from 100-125)
+     *
+     * Total rows added   : 1000
+     * Total rows deleted : 585 (547 via equality delete, 65 via position delete, 30 Overlapping)
+     * Final row count    : 398
+     * </pre>
+     */
+    private void createProductsWithEqDeletesAndOverlappingPosDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("products_with_eq_deletes_and_pos_deletes_upsert"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        ImmutableMap.of(
+                                // Iceberg will write at minimum 100 rows per rowgroup, so set row
+                                // group size small
+                                // enough to
+                                // guarantee that happens
+                                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // delete product_ids [ 25 .. 39 via positional delete -  15 rows removed
+                .positionalDelete(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) >= 25 && r.get(0, Integer.class) < 40)
+                .commit()
+                // delete product_ids [ 0 .. 29 ] via equality delete - 25 rows removed with 5
+                // overlapped from pos del commit
+                .equalityDelete(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) < 30,
+                        equalityIds(PRODUCTS_SCHEMA, "product_id"))
+                .commit()
+                // add 200 rows to gizmo partition
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // delete all products with color 'green' via equality delete - 40 rows removed
+                .equalityDelete(
+                        ImmutableList.of("widget", "gizmo"),
+                        r -> r.get(3, String.class).equals("green"),
+                        equalityIds(PRODUCTS_SCHEMA, "color"))
+                .commit()
+                // add 200 rows each to widget, gadget, and gizmo partitions
+                .append(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200)
+                .commit()
+                // delete product_ids [ 75 ... 125 ] via positional delete - 50 rows removed
+                .positionalDelete(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) >= 75 && r.get(0, Integer.class) < 125)
+                .commit();
 
-  /**
-   * Creates a 'products_with_eq_deletes' table with 3 partitions on the category column: widget,
-   * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
-   * gadget. Each data file has two row groups, each with 100 rows.
-   *
-   * <p>
-   *
-   * <p>Creation steps:
-   *
-   * <p>
-   *
-   * <pre>
-   * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
-   * 2. Delete product_ids [ 25 .. 39 via positional delete                               Total rows: 185
-   * 3. Delete product_ids [ 0 .. 29 ] via equality delete on product_id. (5 Overlapping) Total rows: 160
-   * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
-   * 4. Delete all products with color 'green' via equality delete on color.              Total rows: 323
-   * 5. Insert 600 rows, 200 each in categories 'widget', 'gizmo', 'gadget' with          Total rows: 923
-   *    product_ids [ 400 .. 999]
-   * 7. Delete product_ids [ 75 .. 124 ] via positional delete.                           Total rows: 879
-   *....(2 overlapping from 100-125 from color deletion from earlier)
-   *    (3 overlapping from 75-99 from color deletion from earlier)
-   * 6. Delete product_ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ],                Total rows: 398
-   *    [ 700 .. 799 ], [ 900 .. 999 ] via equality delete on product_id.
-   *    (25 overlapping from 100-125)
-   *
-   * Total rows added   : 1000
-   * Total rows deleted : 585 (547 via equality delete, 65 via position delete, 30 Overlapping)
-   * Final row count    : 398
-   * </pre>
-   */
-  private void createProductsWithEqDeletesAndOverlappingPosDeletes() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_eq_deletes_and_pos_deletes_upsert"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            ImmutableMap.of(
-                // Iceberg will write at minimum 100 rows per rowgroup, so set row group size small
-                // enough to
-                // guarantee that happens
-                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete product_ids [ 25 .. 39 via positional delete -  15 rows removed
-        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) >= 25 && r.get(0, Integer.class) < 40)
-        .commit()
-        // delete product_ids [ 0 .. 29 ] via equality delete - 25 rows removed with 5 overlapped from pos del commit
-        .equalityDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) < 30,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"))
-        .commit()
-        // add 200 rows to gizmo partition
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete all products with color 'green' via equality delete - 40 rows removed
-        .equalityDelete(
-            ImmutableList.of("widget", "gizmo"),
-            r -> r.get(3, String.class).equals("green"),
-            equalityIds(PRODUCTS_SCHEMA, "color"))
-        .commit()
-        // add 200 rows each to widget, gadget, and gizmo partitions
-        .append(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete product_ids [ 75 ... 125 ] via positional delete - 50 rows removed
-        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) >= 75 && r.get(0, Integer.class) < 125)
-        .commit();
+        RowDelta rowDelta = tableGenerator.getTransaction().newRowDelta();
+        tableGenerator
+                // delete product ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ], [ 700 .. 799
+                // ], [ 900
+                // .. 999 ]
+                // taking into account previous deletions this deletes 455 rows with 25 overlapped
+                // from pos del commit
+                .positionalDelete(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) >= 450 && r.get(0, Integer.class) < 475,
+                        rowDelta)
+                .equalityDelete(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        r -> r.get(0, Integer.class) % 200 >= 100,
+                        equalityIds(PRODUCTS_SCHEMA, "product_id"),
+                        rowDelta)
+                .commit();
+    }
 
-      RowDelta rowDelta = tableGenerator.getTransaction().newRowDelta();
-      tableGenerator
-        // delete product ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ], [ 700 .. 799 ], [ 900
-        // .. 999 ]
-        // taking into account previous deletions this deletes 455 rows with 25 overlapped from pos del commit
-        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) >= 450 && r.get(0, Integer.class) < 475, rowDelta)
-        .equalityDelete(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"), rowDelta)
-        .commit();
-  }
-
-  private void createProductsWithEqDeletesSchemaChange() throws IOException {
+    private void createProductsWithEqDeletesSchemaChange() throws IOException {
         Schema initialSchema = PRODUCTS_SCHEMA.select("product_id", "name", "category");
         IcebergTableGenerator tableGenerator =
                 new IcebergTableGenerator(
@@ -739,23 +703,20 @@ public class Main {
 
     private void createWideMetrics() throws IOException {
         IcebergTableGenerator tableGenerator =
-            new IcebergTableGenerator(
-                warehousePath,
-                conf,
-                TableIdentifier.of("wide_metrics"));
+                new IcebergTableGenerator(warehousePath, conf, TableIdentifier.of("wide_metrics"));
         tableGenerator
-            .create(WIDE_METRICS_SCHEMA, PartitionSpec.unpartitioned())
-            .append(this::generateWideMetricsRecord, 30, 1)
-            .commit();
+                .create(WIDE_METRICS_SCHEMA, PartitionSpec.unpartitioned())
+                .append(this::generateWideMetricsRecord, 30, 1)
+                .commit();
     }
 
     private GenericRecord generateIdsRecord(ValueGenerator generator) {
-    GenericRecord record = GenericRecord.create(IDS_SCHEMA);
-    record.set(0, generator.id() * 100);
-    return record;
-  }
+        GenericRecord record = GenericRecord.create(IDS_SCHEMA);
+        record.set(0, generator.id() * 100);
+        return record;
+    }
 
-  private GenericRecord generateOrdersRecord(ValueGenerator generator, Integer partitionValue) {
+    private GenericRecord generateOrdersRecord(ValueGenerator generator, Integer partitionValue) {
         GenericRecord record = GenericRecord.create(ORDERS_SCHEMA);
         record.set(0, generator.id());
         record.set(1, partitionValue);
@@ -766,16 +727,17 @@ public class Main {
         return record;
     }
 
-  private GenericRecord generateOrdersRecordWithNegativeId(ValueGenerator generator, Integer partitionValue) {
-    GenericRecord record = GenericRecord.create(ORDERS_SCHEMA);
-    record.set(0, -1 * generator.id());
-    record.set(1, partitionValue);
-    record.set(2, generator.timestamp(partitionValue));
-    record.set(3, generator.intRange(0, 5));
-    record.set(4, generator.select(PRODUCT_NAMES) + " " + generator.intRange(0, 100));
-    record.set(5, generator.doubleRange(0, 100));
-    return record;
-  }
+    private GenericRecord generateOrdersRecordWithNegativeId(
+            ValueGenerator generator, Integer partitionValue) {
+        GenericRecord record = GenericRecord.create(ORDERS_SCHEMA);
+        record.set(0, -1 * generator.id());
+        record.set(1, partitionValue);
+        record.set(2, generator.timestamp(partitionValue));
+        record.set(3, generator.intRange(0, 5));
+        record.set(4, generator.select(PRODUCT_NAMES) + " " + generator.intRange(0, 100));
+        record.set(5, generator.doubleRange(0, 100));
+        return record;
+    }
 
     private GenericRecord generateOrdersRecordWithSourceIdPartition(
             ValueGenerator generator, Integer partitionValue) {
@@ -802,346 +764,368 @@ public class Main {
         return record;
     }
 
-  /**
-   * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
-   * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
-   * gadget. Each data file has two row groups, each with 100 rows.
-   *
-   * <p>
-   *
-   * <p>Creation steps:
-   *
-   * <p>
-   *
-   * <pre>
-   * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
-   * 2. Delete product_ids [ 25 .. 39 ] via deletion vector                               Total rows: 185
-   * 3. Delete product_ids [ 0 .. 29 ] via equality delete on product_id. (5 Overlapping) Total rows: 160
-   * 4. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
-   * 5. Delete all products with color 'green' via equality delete on color.              Total rows: 324
-   * 6. Insert 200 rows each to widget, gadget, and gizmo partitions,
-   *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 924
-   * 7. Delete product ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ], [ 700 .. 799 ], [ 900
-   *    .. 999 ] via equality delete - 455 rows removed with some overlapped from deletion vector commits
-   *                                                                                       Total rows: 390
-   *
-   * Total rows inserted: 1000
-   * Total rows deleted : 610 (via equality delete and deletion vectors with some overlaps)
-   * Final row count    : 390
-   * </pre>
-   */
-  private void createProductsWithDeletionVectorsAndEqualityDeletes() throws IOException {
-    // Create a properties map with format version 3 for deletion vectors
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put(TableProperties.FORMAT_VERSION, "2");
-    tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+    /**
+     * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
+     * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
+     * gadget. Each data file has two row groups, each with 100 rows.
+     *
+     * <p>
+     *
+     * <p>Creation steps:
+     *
+     * <p>
+     *
+     * <pre>
+     * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
+     * 2. Delete product_ids [ 25 .. 39 ] via deletion vector                               Total rows: 185 (15 rows removed by DV)
+     * 3. Delete product_ids [ 0 .. 29 ] via equality delete on product_id. (5 Overlapping) Total rows: 160 (25 rows removed by EQ Delete) (5 additional overlapped)
+     * 4. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360 (200 rows added)
+     * 5. Delete all products with color 'green' via equality delete on color.              Total rows: 324 (36 rows removed by EQ Delete) (4 additional overlapped from 5...15...25..35)
+     * 6. Insert 200 rows each to widget, gadget, and gizmo partitions,
+     *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 924 (600 rows added)
+     * 7. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ]
+     *    via DVs 300 rows removed                                                          Total rows: 624 (300 rows removed by DVs)
+     *
+     * Total rows inserted: 1000
+     * Total rows deleted : 376 (315 DVs, 70 Eq Deletes, 11 overlapping)
+     * Final row count    : 624
+     * </pre>
+     */
+    private void createProductsWithDeletionVectorsAndEqualityDeletes() throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
 
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_deletion_vectors_and_equality_deletes"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            tableProperties)
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit();
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of("products_with_deletion_vectors_and_equality_deletes"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        tableProperties)
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit();
 
-    // Update to format version 3 to enable deletion vectors
-    tableGenerator.updateTablePropertiesToV3();
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
 
-    tableGenerator
-        // delete product_ids [ 25 .. 39 via deletion vector -  15 rows removed
-        .deletionVectors(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) >= 25 && r.get(0, Integer.class) < 40)
-        .commit()
-        // delete product_ids [ 0 .. 29 ] via equality delete - 25 rows removed with 5 overlapped from deletion vector commit
-        .equalityDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) < 30,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"))
-        .commit()
+        tableGenerator
+                // delete product_ids [ 25 .. 39 via deletion vector -  15 rows removed
+                .deletionVectors(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) >= 25 && r.get(0, Integer.class) < 40)
+                .commit()
+                // delete product_ids [ 0 .. 29 ] via equality delete - 25 rows removed with 5
+                // overlapped from deletion vector commit
+                .equalityDelete(
+                        ImmutableList.of("widget"),
+                        r -> r.get(0, Integer.class) < 30,
+                        equalityIds(PRODUCTS_SCHEMA, "product_id"))
+                .commit()
+                // add 200 rows to gizmo partition
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // delete all products with color 'green' via equality delete - 40 rows removed
+                .equalityDelete(
+                        ImmutableList.of("widget", "gizmo"),
+                        r -> r.get(3, String.class).equals("green"),
+                        equalityIds(PRODUCTS_SCHEMA, "color"))
+                .commit()
+                // add 200 rows each to widget, gadget, and gizmo partitions
+                .append(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200)
+                .commit()
+                .deletionVectors(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                    r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+                .commit();
+    }
+
+    /**
+     * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
+     * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
+     * gadget. Each data file has two row groups, each with 100 rows.
+     *
+     * <p>
+     *
+     * <p>Creation steps:
+     *
+     * <p>
+     *
+     * <pre>
+     * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
+     * 2. Delete product_ids [ 0 .. 39 ] via deletion vector                                Total rows: 160
+     * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
+     * 4. Delete gizmo products with color 'green' via deletion vector.                     Total rows: 340
+     * 5. Insert 200 rows each to widget, gadget, and gizmo partitions,
+     *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 940
+     * 6. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 640
+     *
+     * Total rows inserted: 1000
+     * Total rows deleted : 360 (via DVs)
+     * Final row count    : 640
+     * </pre>
+     */
+    private void createProductsWithDeletionVectorsOnly() throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath, conf, TableIdentifier.of("products_with_deletion_vectors"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        tableProperties)
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit();
+
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
+
+        tableGenerator
+                // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
+                .deletionVectors(ImmutableList.of("widget"), r -> r.get(0, Integer.class) < 40)
+                .commit()
+                // add 200 rows to gizmo partition
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // delete all products with color 'green' via equality delete - 40 rows removed
+                .deletionVectors(
+                        ImmutableList.of("gizmo"), r -> r.get(3, String.class).equals("green") && r.get(0, Integer.class) >= 40)
+                .commit()
+                // add 200 rows each to widget, gadget, and gizmo partitions
+                .append(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200)
+                .commit()
+                .deletionVectors(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+                .commit();
+    }
+
+    /**
+     * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
+     * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
+     * gadget. Each data file has two row groups, each with 100 rows.
+     *
+     * <p>
+     *
+     * <p>Creation steps:
+     *
+     * <p>
+     *
+     * <pre>
+     * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
+     * 2. Delete product_ids [ 0 .. 39 ] via v2 position delete                             Total rows: 160 (40 rows removed by V2 Pos)
+     * 4. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360 (200 rows added)
+     * 5. Delete all gizmo products w color 'green' via v2pos del .                         Total rows: 340 (20 rows removed by V2 Pos, No overlap from previous delete because same format)
+     * 6. Insert 200 rows each to widget, gadget, and gizmo partitions,
+     *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 940 (600 rows added)
+     * 9. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 640 (300 rows removed by DV)
+     *
+     * Total rows inserted: 1000
+     * Total rows deleted : 360 (60 via V2 Pos, 300 via DV... both go under total-position-deletes)
+     * Final row count    :640
+     * </pre>
+     */
+    private void createProductsWithDeletionVectorsAndV2PositionDeletes() throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of(
+                                "products_with_deletion_vectors_and_v2_position_deletes"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        tableProperties)
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit();
+
+        tableGenerator
+                // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
+                .positionalDelete(ImmutableList.of("widget"), r -> r.get(0, Integer.class) < 40)
+                .commit();
+
         // add 200 rows to gizmo partition
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete all products with color 'green' via equality delete - 40 rows removed
-        .equalityDelete(
-            ImmutableList.of("widget", "gizmo"),
-            r -> r.get(3, String.class).equals("green"),
-            equalityIds(PRODUCTS_SCHEMA, "color"))
-        .commit()
-        // add 200 rows each to widget, gadget, and gizmo partitions
-        .append(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .equalityDelete(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"))
-        .commit();
-  }
+        tableGenerator
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                .positionalDelete(
+                        ImmutableList.of("gizmo"), r -> r.get(3, String.class).equals("green"))
+                .commit();
 
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
 
-  /**
-   * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
-   * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
-   * gadget. Each data file has two row groups, each with 100 rows.
-   *
-   * <p>
-   *
-   * <p>Creation steps:
-   *
-   * <p>
-   *
-   * <pre>
-   * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
-   * 2. Delete product_ids [ 0 .. 39 ] via deletion vector                                Total rows: 160
-   * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
-   * 4. Delete gizmo products with color 'green' via deletion vector.                     Total rows: 340
-   * 5. Insert 200 rows each to widget, gadget, and gizmo partitions,
-   *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 940
-   * 6. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 640
-   *
-   * Total rows inserted: 1000
-   * Total rows deleted : 360 (via DVs)
-   * Final row count    : 640
-   * </pre>
-   */
-  private void createProductsWithDeletionVectorsOnly() throws IOException {
-    // Create a properties map with format version 3 for deletion vectors
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put(TableProperties.FORMAT_VERSION, "2");
-    tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+        tableGenerator
+                // add 200 rows each to widget, gadget, and gizmo partitions
+                .append(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200)
+                .commit()
+                .deletionVectors(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+                .commit();
+    }
 
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_deletion_vectors"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            tableProperties)
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit();
+    /**
+     * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
+     * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
+     * gadget. Each data file has two row groups, each with 100 rows.
+     *
+     * <p>
+     *
+     * <p>Creation steps:
+     *
+     * <p>
+     *
+     * <pre>
+     * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
+     * 2. Delete product_ids [ 0 .. 39 ] via v2 position delete                             Total rows: 160 (40 rows removed by V2 Pos)
+     * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360 (200 rows added)
+     * 4. Delete all products with color 'green' and via v2 pos delete.                     Total rows: 325 (20 rows removed by Equality Delete, 20 overlap)
+     * 5. Insert 200 rows each to widget, gadget, and gizmo partitions,
+     *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 925 (600 rows added)
+     * 6. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 625 (300 rows removed by DVs)
+     *
+     * Total rows inserted: 1000
+     * Total rows deleted : 375 (40 via v2 Position Deletes, 35 via Equality Deletes, 300 via Deletion Vectors)
+     * Final row count    : 625
+     * </pre>
+     */
+    private void createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes()
+            throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
 
-    // Update to format version 3 to enable deletion vectors
-    tableGenerator.updateTablePropertiesToV3();
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of(
+                                "products_with_deletion_vectors_and_equality_deletes_and_v2_position_deletes"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        tableProperties)
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit();
 
-    tableGenerator
-        // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
-        .deletionVectors(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) < 40)
-        .commit()
-        // add 200 rows to gizmo partition
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete all products with color 'green' via equality delete - 40 rows removed
-        .deletionVectors(
-            ImmutableList.of("gizmo"),
-            r -> r.get(3, String.class).equals("green"))
-        .commit()
-        // add 200 rows each to widget, gadget, and gizmo partitions
-        .append(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .equalityDelete(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"))
-        .commit();
-  }
+        tableGenerator
+                // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
+                .positionalDelete(ImmutableList.of("widget"), r -> r.get(0, Integer.class) < 40)
+                .commit();
 
+        tableGenerator
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                .equalityDelete(
+                        ImmutableList.of("widget", "gizmo"),
+                        r -> r.get(3, String.class).equals("green"),
+                        equalityIds(PRODUCTS_SCHEMA, "color"));
 
-  /**
-   * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
-   * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
-   * gadget. Each data file has two row groups, each with 100 rows.
-   *
-   * <p>
-   *
-   * <p>Creation steps:
-   *
-   * <p>
-   *
-   * <pre>
-   * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
-   * 2. Delete product_ids [ 0 .. 39 ] via v2 position delete                             Total rows: 160
-   * 4. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
-   * 5. Delete all gizmo products w color 'green' via v2pos del .                         Total rows: 340
-   * 6. Insert 200 rows each to widget, gadget, and gizmo partitions,
-   *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 940
-   * 9. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 640
-   *
-   * Total rows inserted: 1000
-   * Total rows deleted : 360 (via DVs)
-   * Final row count    :640
-   * </pre>
-   */
-  private void createProductsWithDeletionVectorsAndV2PositionDeletes() throws IOException {
-    // Create a properties map with format version 3 for deletion vectors
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put(TableProperties.FORMAT_VERSION, "2");
-    tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
 
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_deletion_vectors_and_v2_position_deletes"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            tableProperties)
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit();
+        tableGenerator
+                // add 200 rows each to widget, gadget, and gizmo partitions
+                .append(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200)
+                .commit()
+                .deletionVectors(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+                .commit();
+    }
 
-    tableGenerator
-        // delete product_ids [ 25 .. 39 via deletion vector -  15 rows removed
-        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) < 40)
-        .commit();
+    private void createProductsWithEqDeletesAndPosDeletesSameSequenceNumber() throws IOException {
+        IcebergTableGenerator tableGenerator =
+                new IcebergTableGenerator(
+                        warehousePath,
+                        conf,
+                        TableIdentifier.of(
+                                "products_with_eq_deletes_and_pos_deletes_matching_sequence_numbers"));
+        tableGenerator
+                .create(
+                        PRODUCTS_SCHEMA,
+                        PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+                        ImmutableMap.of(
+                                // Iceberg will write at minimum 100 rows per rowgroup, so set row
+                                // group size small
+                                // enough to
+                                // guarantee that happens
+                                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+                // add 200 rows to widget partition
+                .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // add 200 rows to gizmo partition
+                .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+                .commit()
+                // delete all products with color 'green' via equality delete - 40 rows removed
+                .equalityDelete(
+                        ImmutableList.of("widget", "gizmo"),
+                        r -> r.get(3, String.class).equals("green"),
+                        equalityIds(PRODUCTS_SCHEMA, "color"))
+                .commit();
 
-    // add 200 rows to gizmo partition
-    tableGenerator
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .positionalDelete(
-            ImmutableList.of("gizmo"),
-            r -> r.get(3, String.class).equals("green"))
-        .commit();
-
-    // Update to format version 3 to enable deletion vectors
-    tableGenerator.updateTablePropertiesToV3();
-
-    tableGenerator
-        // add 200 rows each to widget, gadget, and gizmo partitions
-        .append(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .deletionVectors(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
-        .commit();
-  }
-
-
-  /**
-   * Creates a 'products_with_deletion_vectors' table with 3 partitions on the category column: widget,
-   * gadget, gizmo. 5 data files with 200 rows each are created - 2 in widget, 2 in gizmo, 1 in
-   * gadget. Each data file has two row groups, each with 100 rows.
-   *
-   * <p>
-   *
-   * <p>Creation steps:
-   *
-   * <p>
-   *
-   * <pre>
-   * 1. Insert 200 rows with category 'widget', product_ids from [ 0 .. 199 ].            Total rows: 200
-   * 2. Delete product_ids [ 0 .. 39 ] via v2 position delete                             Total rows: 160
-   * 3. Insert 200 rows with category 'gizmo', product_ids from [ 200 .. 399 ].           Total rows: 360
-   * 4. Delete all products with color 'green' and via v2 pos delete.                     Total rows: 325
-   * 5. Insert 200 rows each to widget, gadget, and gizmo partitions,
-   *    product_ids from [ 400 .. 599 ], [ 600 .. 799 ], [ 800 .. 999 ].                  Total rows: 925
-   * 6. Delete product ids [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ] via DV          Total rows: 625
-   *
-   * Total rows inserted: 1000
-   * Total rows deleted : 375 (40 via v2 Position Deletes, 35 via Equality Deletes, 300 via Deletion Vectors)
-   * Final row count    : 625
-   * </pre>
-   */
-  private void createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes() throws IOException {
-    // Create a properties map with format version 3 for deletion vectors
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put(TableProperties.FORMAT_VERSION, "2");
-    tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
-
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_deletion_vectors_and_equality_deletes_and_v2_position_deletes"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            tableProperties)
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit();
-
-    tableGenerator
-        // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
-        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) < 40)
-        .commit();
-
-
-    tableGenerator
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .equalityDelete(
-        ImmutableList.of("widget", "gizmo"),
-        r -> r.get(3, String.class).equals("green"),
-        equalityIds(PRODUCTS_SCHEMA, "color"));
-
-
-    // Update to format version 3 to enable deletion vectors
-    tableGenerator.updateTablePropertiesToV3();
-
-    tableGenerator
-        // add 200 rows each to widget, gadget, and gizmo partitions
-        .append(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        .deletionVectors(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
-        .commit();
-  }
-
-
-  private void createProductsWithEqDeletesAndPosDeletesSameSequenceNumber() throws IOException {
-    IcebergTableGenerator tableGenerator =
-        new IcebergTableGenerator(
-            warehousePath, conf, TableIdentifier.of("products_with_eq_deletes_and_pos_deletes_matching_sequence_numbers"));
-    tableGenerator
-        .create(
-            PRODUCTS_SCHEMA,
-            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
-            ImmutableMap.of(
-                // Iceberg will write at minimum 100 rows per rowgroup, so set row group size small
-                // enough to
-                // guarantee that happens
-                TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
-        // add 200 rows to widget partition
-        .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // add 200 rows to gizmo partition
-        .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
-        .commit()
-        // delete all products with color 'green' via equality delete - 40 rows removed
-        .equalityDelete(
-            ImmutableList.of("widget", "gizmo"),
-            r -> r.get(3, String.class).equals("green"),
-            equalityIds(PRODUCTS_SCHEMA, "color"))
-        .commit();
-
-    RowDelta rowDelta = tableGenerator.getTransaction().newRowDelta();
-    tableGenerator
-        // delete product ids [ 100 .. 199 ], [ 300 .. 399 ].
-        // The EQ Deletes should NOT be applied to [ 500 .. 599 ], [ 700 .. 799 ], [ 900 .. 999 ]
-        // taking into account previous deletions this deletes 455 rows with 25 overlapped from pos del commit
-        .appendWithRowDelta(ImmutableList.of("widget", "gadget", "gizmo"), this::generateProductsRecord, 1, 200, rowDelta, false)
-/*        .positionalDelete(
-            ImmutableList.of("widget"),
-            r -> r.get(0, Integer.class) >= 250 && r.get(0, Integer.class) < 275, rowDelta)*/
-        .equalityDelete(
-            ImmutableList.of("widget", "gadget", "gizmo"),
-            r -> r.get(0, Integer.class) % 200 >= 100,
-            equalityIds(PRODUCTS_SCHEMA, "product_id"), rowDelta)
-        .commit();
-  }
+        RowDelta rowDelta = tableGenerator.getTransaction().newRowDelta();
+        tableGenerator
+                // delete product ids [ 100 .. 199 ], [ 300 .. 399 ].
+                // The EQ Deletes should NOT be applied to [ 500 .. 599 ], [ 700 .. 799 ], [ 900 ..
+                // 999 ]
+                // taking into account previous deletions this deletes 455 rows with 25 overlapped
+                // from pos del commit
+                .appendWithRowDelta(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        this::generateProductsRecord,
+                        1,
+                        200,
+                        rowDelta,
+                        false)
+                /*        .positionalDelete(
+                ImmutableList.of("widget"),
+                r -> r.get(0, Integer.class) >= 250 && r.get(0, Integer.class) < 275, rowDelta)*/
+                .equalityDelete(
+                        ImmutableList.of("widget", "gadget", "gizmo"),
+                        r -> r.get(0, Integer.class) % 200 >= 100,
+                        equalityIds(PRODUCTS_SCHEMA, "product_id"),
+                        rowDelta)
+                .commit();
+    }
 
     private GenericRecord getFakeOrdersRecordForExtraDeletes() {
         GenericRecord record = GenericRecord.create(ORDERS_SCHEMA);

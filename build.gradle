@@ -8,11 +8,12 @@ group = 'org.example'
 version = '1.0-SNAPSHOT'
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
 }
 
 repositories {
+	mavenLocal()
 	mavenCentral()
 }
 
@@ -21,19 +22,20 @@ application {
 }
 
 dependencies {
-    implementation 'org.apache.iceberg:iceberg-core:1.9.0'
-    implementation 'org.apache.iceberg:iceberg-parquet:1.9.0'
-    implementation 'org.apache.iceberg:iceberg-data:1.9.0'
-    implementation 'org.apache.hadoop:hadoop-common:3.3.1'
-    implementation 'org.apache.hadoop:hadoop-aws:3.3.1'
-    implementation 'org.apache.hadoop:hadoop-azure:3.3.1'
-    implementation 'org.apache.hadoop:hadoop-mapreduce-client-core:3.3.1'
-    implementation 'org.apache.commons:commons-lang3:3.12.0'
-    implementation 'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.7'
-    implementation 'com.beust:jcommander:1.82'
-    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.2'
-    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
-    implementation 'org.apache.parquet:parquet-hadoop:1.15.1'
+	implementation 'org.apache.iceberg:iceberg-api:1.10.0-SNAPSHOT'
+	implementation 'org.apache.iceberg:iceberg-core:1.10.0-SNAPSHOT'
+	implementation 'org.apache.iceberg:iceberg-parquet:1.10.0-SNAPSHOT'
+	implementation 'org.apache.iceberg:iceberg-data:1.10.0-SNAPSHOT'
+	implementation 'org.apache.hadoop:hadoop-common:3.3.1'
+	implementation 'org.apache.hadoop:hadoop-aws:3.3.1'
+	implementation 'org.apache.hadoop:hadoop-azure:3.3.1'
+	implementation 'org.apache.hadoop:hadoop-mapreduce-client-core:3.3.1'
+	implementation 'org.apache.commons:commons-lang3:3.12.0'
+	implementation 'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.7'
+	implementation 'com.beust:jcommander:1.82'
+	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.2'
+	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
+	implementation 'org.apache.parquet:parquet-hadoop:1.15.1'
 }
 
 test {

@@ -2,7 +2,6 @@
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
@@ -43,9 +42,7 @@ import org.apache.iceberg.data.Record;
 import org.apache.iceberg.data.parquet.GenericParquetReaders;
 import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.deletes.BaseDVFileWriter;
-import org.apache.iceberg.deletes.DVFileWriter;
 import org.apache.iceberg.deletes.EqualityDeleteWriter;
-import org.apache.iceberg.deletes.PositionDelete;
 import org.apache.iceberg.deletes.PositionDelete;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.deletes.PositionDeleteWriter;
@@ -56,12 +53,11 @@ import org.apache.iceberg.hadoop.HadoopCatalog;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileAppender;
-import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.FileWriterFactory;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.encryption.EncryptedOutputFile;
+import org.apache.iceberg.encryption.EncryptedFiles;
 import org.apache.iceberg.parquet.Parquet;
-import org.apache.parquet.column.ParquetProperties;
 
 public class IcebergTableGenerator {
 
@@ -71,6 +67,10 @@ public class IcebergTableGenerator {
     private final TableIdentifier id;
     private Table table;
     private Transaction transaction;
+
+    // Table-specific counters for deletion vector files per partition
+    private final java.util.Map<String, java.util.concurrent.atomic.AtomicInteger>
+        partitionDVCounters = new java.util.concurrent.ConcurrentHashMap<>();
 
     public IcebergTableGenerator(String warehousePath, Configuration conf, TableIdentifier id) {
         this.catalog = new HadoopCatalog();
@@ -102,10 +102,10 @@ public class IcebergTableGenerator {
     }
 
     public void updateTablePropertiesToV3() {
-    table.updateProperties()
-        .set("format-version", "3")
-        .commit();
-  }public Table getTable() {
+        table.updateProperties().set("format-version", "3").commit();
+    }
+
+    public Table getTable() {
         return table;
     }
 
@@ -124,25 +124,27 @@ public class IcebergTableGenerator {
             int dataFilesPerPartition,
             int rowsPerDataFile,
             RowDelta rowDeltaInProgress,
-            boolean commit) throws IOException {
-      Preconditions.checkState(table != null, "create must be called first");
-      URI dataDir = getDataDirectory(id);
-      RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+            boolean commit)
+            throws IOException {
+        Preconditions.checkState(table != null, "create must be called first");
+        URI dataDir = getDataDirectory(id);
+        RowDelta rowDelta =
+                rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
-      for (T value : partitionValues) {
-        URI partitionDir = dataDir.resolve(value.toString() + "/");
-        for (int fileNum = 0; fileNum < dataFilesPerPartition; fileNum++) {
-          OutputFile parquetFile =
-              getUniqueNumberedFilename(
-                  partitionDir.resolve(value + "-%02d.parquet").toString());
-          rowDelta.addRows(
-              writeDataFile(parquetFile, value, recordGenerator, rowsPerDataFile));
+        for (T value : partitionValues) {
+            URI partitionDir = dataDir.resolve(value.toString() + "/");
+            for (int fileNum = 0; fileNum < dataFilesPerPartition; fileNum++) {
+                OutputFile parquetFile =
+                        getUniqueNumberedFilename(
+                                partitionDir.resolve(value + "-%02d.parquet").toString());
+                rowDelta.addRows(
+                        writeDataFile(parquetFile, value, recordGenerator, rowsPerDataFile));
+            }
         }
-      }
-      if (commit) {
-        rowDelta.commit();
-      }
-      return this;
+        if (commit) {
+            rowDelta.commit();
+        }
+        return this;
     }
 
     public <T> IcebergTableGenerator append(
@@ -224,133 +226,162 @@ public class IcebergTableGenerator {
         return positionalDelete(null, deletePredicate, 0, 0, null, null, null);
     }
 
-  public IcebergTableGenerator deleteVectors(String specificDataFilePath)
-      throws IOException {
-    // This method is deprecated - use deletionVectors with predicates instead
-    // For now, just call the predicate version with a dummy predicate
-    return deletionVectors(null, record -> false); // Delete nothing with dummy predicate
-  }
+    public <T> IcebergTableGenerator deletionVectors(
+            List<T> partitionValues, Predicate<Record> deletePredicate) throws IOException {
+        return deletionVectors(partitionValues, deletePredicate, null);
+    }
 
-  public <T> IcebergTableGenerator deletionVectors(
-      List<T> partitionValues, Predicate<Record> deletePredicate) throws IOException {
-    return deletionVectors(partitionValues, deletePredicate, null);
-  }
+    public <T> IcebergTableGenerator deletionVectors(
+            List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDeltaInProgress)
+            throws IOException {
+        URI dataDir = getDataDirectory(id);
+        Expression expr =
+                partitionValues != null
+                        ? Expressions.in(
+                                table.spec().fields().get(0).name(), partitionValues.toArray())
+                        : Expressions.alwaysTrue();
+        CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-  public <T> IcebergTableGenerator deletionVectors(
-      List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDeltaInProgress) throws IOException {
-    URI dataDir = getDataDirectory(id);
-    Expression expr =
-        partitionValues != null
-            ? Expressions.in(
-                table.spec().fields().get(0).name(), partitionValues.toArray())
-            : Expressions.alwaysTrue();
-    CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
+        RowDelta rowDelta =
+                rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
-    RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+        Map<PartitionKey, List<FileScanTask>> orderedTasks =
+                orderFileScanTasksByPartitionAndPath(scanTasks);
+        for (PartitionKey key : orderedTasks.keySet()) {
+            List<String> dataFiles =
+                    orderedTasks.get(key).stream()
+                            .map(t -> t.file().location())
+                            .sorted(String::compareTo)
+                            .collect(Collectors.toList());
 
-    Map<PartitionKey, List<FileScanTask>> orderedTasks =
-        orderFileScanTasksByPartitionAndPath(scanTasks);
-    for (PartitionKey key : orderedTasks.keySet()) {
-      List<String> dataFiles =
-          orderedTasks.get(key).stream()
-              .map(t -> t.file().location())
-              .sorted(String::compareTo)
-              .collect(Collectors.toList());
-
-      // Use a different approach: manually create deletion vector files in partition directories
-      // by using a custom DV writer that handles partition placement
-      String partitionPath;
-      if (key.size() > 0) {
-        String partitionString = partitionKeyDirectoryName(key);
-        URI partitionDir =
-            partitionString.length() > 0
-                ? dataDir.resolve(partitionString + "/")
-                : dataDir;
-        partitionPath = partitionDir.toString();
-        System.out.println("Creating deletion vector files in partition directory: " + partitionDir);
-      } else {
-        partitionPath = dataDir.toString();
-        System.out.println("Creating deletion vector files in root directory: " + dataDir);
-      }
-
-      // Use standard BaseDVFileWriter - files will be created in table data directory
-      // Note: Partition directory placement is a limitation we need to address separately
-      OutputFileFactory fileFactory =
-          OutputFileFactory.builderFor(table, 100, 1).format(FileFormat.PUFFIN).build();
-      BaseDVFileWriter dvWriter =
-          new BaseDVFileWriter(fileFactory, new PreviousDeleteLoader(table, ImmutableMap.of()));
-
-      try {
-        for (String path : dataFiles) {
-          try (CloseableIterable<Record> reader =
-              Parquet.read(table.io().newInputFile(path))
-                  .project(table.schema())
-                  .reuseContainers()
-                  .createReaderFunc(
-                      fileSchema ->
-                          GenericParquetReaders.buildReader(
-                              table.schema(), fileSchema))
-                  .build()) {
-
-            long pos = 0;
-            int deletedCount = 0;
-            int totalCount = 0;
-            for (Record record : reader) {
-              totalCount++;
-              if (deletePredicate.test(record)) {
-                dvWriter.delete(path, pos, table.spec(), key);
-                deletedCount++;
-                System.out.println("Marking row " + pos + " for deletion in file: " + path);
-              }
-              pos++;
+            // Use a different approach: manually create deletion vector files in partition
+            // directories
+            // by using a custom DV writer that handles partition placement
+            String partitionPath;
+            if (key.size() > 0) {
+                String partitionString = partitionKeyDirectoryName(key);
+                URI partitionDir =
+                        partitionString.length() > 0
+                                ? dataDir.resolve(partitionString + "/")
+                                : dataDir;
+                partitionPath = partitionDir.toString();
+                System.out.println(
+                        "Creating deletion vector files in partition directory: " + partitionDir);
+            } else {
+                partitionPath = dataDir.toString();
+                System.out.println("Creating deletion vector files in root directory: " + dataDir);
             }
-            System.out.println("Processed " + totalCount + " records, marked " + deletedCount + " for deletion in file: " + path);
-          }
+
+            // Create custom DV writer that uses partition-aware file creation
+            OutputFileFactory fileFactory =
+                    OutputFileFactory.builderFor(table, 100, 1)
+                            .format(FileFormat.PUFFIN)
+                            .defaultSpec(table.spec())
+                            .build();
+
+            // Use the proper BaseDVFileWriter extension for partition-aware deletion vectors
+            PartitionAwareDVFileWriter dvWriter =
+                    new PartitionAwareDVFileWriter(
+                            fileFactory,
+                            new PreviousDeleteLoader(table, ImmutableMap.of()),
+                            table.spec(),
+                            key,
+                            partitionKeyDirectoryName(key));
+
+            String partitionInfo =
+                    key.size() > 0 ? partitionKeyDirectoryName(key) : "unpartitioned";
+            System.out.println(
+                    "Creating deletion vector files directly in partition: " + partitionInfo);
+
+            try {
+                for (String path : dataFiles) {
+                    try (CloseableIterable<Record> reader =
+                            Parquet.read(table.io().newInputFile(path))
+                                    .project(table.schema())
+                                    .reuseContainers()
+                                    .createReaderFunc(
+                                            fileSchema ->
+                                                    GenericParquetReaders.buildReader(
+                                                            table.schema(), fileSchema))
+                                    .build()) {
+
+                        long pos = 0;
+                        int deletedCount = 0;
+                        int totalCount = 0;
+                        for (Record record : reader) {
+                            totalCount++;
+                            if (deletePredicate.test(record)) {
+                                dvWriter.delete(path, pos, table.spec(), key);
+                                deletedCount++;
+                                System.out.println(
+                                        "Marking row " + pos + " for deletion in file: " + path);
+                            }
+                            pos++;
+                        }
+                        System.out.println(
+                                "Processed "
+                                        + totalCount
+                                        + " records, marked "
+                                        + deletedCount
+                                        + " for deletion in file: "
+                                        + path);
+                    }
+                }
+                dvWriter.close();
+                DeleteWriteResult res = dvWriter.result();
+                List<DeleteFile> deleteFiles = res.deleteFiles();
+                System.out.println("Created " + deleteFiles.size() + " deletion vector files");
+                for (DeleteFile deleteFile : deleteFiles) {
+                    System.out.println(
+                            "Adding deletion vector file to rowDelta: "
+                                    + deleteFile.path()
+                                    + " (recordCount: "
+                                    + deleteFile.recordCount()
+                                    + ")");
+                    rowDelta.addDeletes(deleteFile);
+                }
+            } catch (Exception e) {
+                try {
+                    dvWriter.close();
+                } catch (Exception closeException) {
+                    e.addSuppressed(closeException);
+                }
+                throw e;
+            }
         }
-        dvWriter.close();
-        DeleteWriteResult res = dvWriter.result();
-        List<DeleteFile> deleteFiles = res.deleteFiles();
-        System.out.println("Created " + deleteFiles.size() + " deletion vector files");
-        for (DeleteFile deleteFile : deleteFiles) {
-          System.out.println("Adding deletion vector file to rowDelta: " + deleteFile.path() +
-              " (recordCount: " + deleteFile.recordCount() + ")");
-          rowDelta.addDeletes(deleteFile);
+
+        if (rowDeltaInProgress == null) {
+            System.out.println("Committing rowDelta with deletion vector changes...");
+            rowDelta.commit();
+            System.out.println("RowDelta committed successfully!");
+        } else {
+            System.out.println("RowDelta not committed (will be committed later with transaction).");
         }
-      } catch (Exception e) {
-        try {
-          dvWriter.close();
-        } catch (Exception closeException) {
-          e.addSuppressed(closeException);
-        }
-        throw e;
-      }
+        return this;
     }
 
-    if (rowDeltaInProgress == null) {
-      rowDelta.commit();
+    public IcebergTableGenerator positionalDelete(
+            Predicate<Record> deletePredicate, String specificDataFilePath) throws IOException {
+        return positionalDelete(null, deletePredicate, 0, 0, null, specificDataFilePath, null);
     }
-    return this;
-  }
 
-  public IcebergTableGenerator positionalDelete(Predicate<Record> deletePredicate, String specificDataFilePath)
-      throws IOException {
-    return positionalDelete(null, deletePredicate, 0, 0, null, specificDataFilePath, null);
-  }
-
-  public <T> IcebergTableGenerator positionalDelete(
-      List<T> partitionValues, Predicate<Record> deletePredicate, String specificDataFilePath) throws IOException {
-    return positionalDelete(partitionValues, deletePredicate, 0, 0, null, specificDataFilePath, null);
-  }
+    public <T> IcebergTableGenerator positionalDelete(
+            List<T> partitionValues, Predicate<Record> deletePredicate, String specificDataFilePath)
+            throws IOException {
+        return positionalDelete(
+                partitionValues, deletePredicate, 0, 0, null, specificDataFilePath, null);
+    }
 
     public <T> IcebergTableGenerator positionalDelete(
             List<T> partitionValues, Predicate<Record> deletePredicate) throws IOException {
         return positionalDelete(partitionValues, deletePredicate, 0, 0, null, null, null);
     }
 
-  public <T> IcebergTableGenerator positionalDelete(
-      List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDelta) throws IOException {
-    return positionalDelete(partitionValues, deletePredicate, 0, 0, null, null, rowDelta);
-  }
+    public <T> IcebergTableGenerator positionalDelete(
+            List<T> partitionValues, Predicate<Record> deletePredicate, RowDelta rowDelta)
+            throws IOException {
+        return positionalDelete(partitionValues, deletePredicate, 0, 0, null, null, rowDelta);
+    }
 
     public <T> IcebergTableGenerator positionalDelete(
             List<T> partitionValues,
@@ -369,7 +400,8 @@ public class IcebergTableGenerator {
                         : Expressions.alwaysTrue();
         CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-        RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+        RowDelta rowDelta =
+                rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
         Map<PartitionKey, List<FileScanTask>> orderedTasks =
                 orderFileScanTasksByPartitionAndPath(scanTasks);
@@ -394,13 +426,16 @@ public class IcebergTableGenerator {
             Set<String> realDataFiles =
                     orderedTasks.get(key).stream()
                             .map(t -> t.file().location())
-                            .filter(path -> specificDataFilePath == null || path.equals(specificDataFilePath))
-              .collect(Collectors.toSet());
+                            .filter(
+                                    path ->
+                                            specificDataFilePath == null
+                                                    || path.equals(specificDataFilePath))
+                            .collect(Collectors.toSet());
 
-      // Skip if no matching files in this partition
-      if (realDataFiles.isEmpty()) {
-        continue;
-      }
+            // Skip if no matching files in this partition
+            if (realDataFiles.isEmpty()) {
+                continue;
+            }
 
             List<String> dataFiles = new ArrayList<>(realDataFiles);
             for (int i = 0; i < extraDataFileCountPerPartition; i++) {
@@ -433,35 +468,35 @@ public class IcebergTableGenerator {
                                                                 table.schema(), fileSchema))
                                         .build()) {
 
-              int pos = 0;
-              for (Record record : reader) {
-                if (deletePredicate.test(record)) {
-                  PositionDelete<Record> posDel = PositionDelete.create();
-                  posDel.set(path, pos, record);
-                  writer.write(posDel);
+                            int pos = 0;
+                            for (Record record : reader) {
+                                if (deletePredicate.test(record)) {
+                                    PositionDelete<Record> posDel = PositionDelete.create();
+                                    posDel.set(path, pos, record);
+                                    writer.write(posDel);
+                                }
+                                pos++;
+                            }
+                        }
+                    } else {
+                        for (int i = 0, pos = 0;
+                                i < extraDeleteCountPerDataFile;
+                                i++, pos += generator.intRange(1, 100)) {
+                            PositionDelete<Record> posDel = PositionDelete.create();
+                            posDel.set(path, pos);
+                            writer.write(posDel);
+                        }
+                    }
                 }
-                pos++;
-              }
             }
-          } else {
-            for (int i = 0, pos = 0;
-                i < extraDeleteCountPerDataFile;
-                i++, pos += generator.intRange(1, 100)) {
-              PositionDelete<Record> posDel = PositionDelete.create();
-              posDel.set(path, pos);
-              writer.write(posDel);
-            }
-          }
-        }
-      }
 
             rowDelta.addDeletes(deleteWriter.toDeleteFile());
-      }
+        }
 
-      if (rowDeltaInProgress == null)  {
-        rowDelta.commit();
-      }
-      return this;
+        if (rowDeltaInProgress == null) {
+            rowDelta.commit();
+        }
+        return this;
     }
 
     public IcebergTableGenerator equalityDelete(
@@ -469,14 +504,17 @@ public class IcebergTableGenerator {
         return equalityDelete(null, deletePredicate, equalityIds, null);
     }
 
-  public <T> IcebergTableGenerator equalityDelete(
-      List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds)
-      throws IOException {
-      return equalityDelete(partitionValues, deletePredicate, equalityIds, null);
-  }
+    public <T> IcebergTableGenerator equalityDelete(
+            List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds)
+            throws IOException {
+        return equalityDelete(partitionValues, deletePredicate, equalityIds, null);
+    }
 
     public <T> IcebergTableGenerator equalityDelete(
-            List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds, RowDelta rowDeltaInProgress)
+            List<T> partitionValues,
+            Predicate<Record> deletePredicate,
+            List<Integer> equalityIds,
+            RowDelta rowDeltaInProgress)
             throws IOException {
         URI dataDir = getDataDirectory(id);
         Expression expr =
@@ -486,7 +524,8 @@ public class IcebergTableGenerator {
                         : Expressions.alwaysTrue();
         CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
 
-        RowDelta rowDelta = rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
+        RowDelta rowDelta =
+                rowDeltaInProgress != null ? rowDeltaInProgress : getTransaction().newRowDelta();
 
         Map<PartitionKey, List<FileScanTask>> orderedTasks =
                 orderFileScanTasksByPartitionAndPath(scanTasks);
@@ -533,14 +572,14 @@ public class IcebergTableGenerator {
                                                             table.schema(), fileSchema))
                                     .build()) {
 
-            for (Record record : reader) {
-              if (deletePredicate.test(record)) {
-                writer.write(record);
-              }
+                        for (Record record : reader) {
+                            if (deletePredicate.test(record)) {
+                                writer.write(record);
+                            }
+                        }
+                    }
+                }
             }
-          }
-        }
-      }
 
             rowDelta.addDeletes(deleteWriter.toDeleteFile());
         }
@@ -561,8 +600,14 @@ public class IcebergTableGenerator {
     }
 
     public IcebergTableGenerator commit() {
-        transaction.commitTransaction();
-        transaction = null;
+        if (transaction != null) {
+            System.out.println("Committing transaction to persist metadata changes...");
+            transaction.commitTransaction();
+            transaction = null;
+            System.out.println("Transaction committed successfully!");
+        } else {
+            System.out.println("No transaction to commit.");
+        }
         return this;
     }
 
@@ -670,29 +715,115 @@ public class IcebergTableGenerator {
         return builder.toString();
     }
 
+    // Custom DV writer that extends BaseDVFileWriter and overrides close() for partition-aware file
+    // creation
+    private class PartitionAwareDVFileWriter extends BaseDVFileWriter {
+        private final OutputFileFactory fileFactory;
+        private final PartitionSpec spec;
+        private final PartitionKey partitionKey;
+        private final String partitionString;
 
+        PartitionAwareDVFileWriter(
+                OutputFileFactory fileFactory,
+                Function<String, PositionDeleteIndex> previousDeleteLoader,
+                PartitionSpec spec,
+                PartitionKey partitionKey,
+                String partitionString) {
+            super(fileFactory, previousDeleteLoader);
+            this.fileFactory = fileFactory;
+            this.spec = spec;
+            this.partitionKey = partitionKey;
+            this.partitionString = partitionString;
+            System.out.println(
+                    "Created PartitionAwareDVFileWriter for partition: " + partitionString);
+        }
 
+        @Override
+        public void close() throws IOException {
+            System.out.println(
+                    "PartitionAwareDVFileWriter.close() called for partition: " + partitionString);
 
+            if (partitionKey.size() > 0) {
+                // Get or create counter for this partition (starts at 0) from table-level counters
+                java.util.concurrent.atomic.AtomicInteger counter =
+                        partitionDVCounters.computeIfAbsent(
+                                partitionString,
+                                k -> new java.util.concurrent.atomic.AtomicInteger(0));
 
+                // Get current counter value and then increment for next time
+                int fileNumber = counter.getAndIncrement();
 
-  private static class PreviousDeleteLoader implements Function<String, PositionDeleteIndex> {
-    private final Map<String, DeleteFile> deleteFiles;
-    private final DeleteLoader deleteLoader;
+                // Create a partition-aware path using the table's IO directly
+                String partitionPath = createPartitionAwarePath(fileNumber);
 
-    PreviousDeleteLoader(Table table, Map<String, DeleteFile> deleteFiles) {
-      this.deleteFiles = deleteFiles;
-      this.deleteLoader = new BaseDeleteLoader(deleteFile -> table.io().newInputFile(deleteFile));
+                System.out.println(
+                        "Creating deletion vector file #"
+                                + fileNumber
+                                + " in partition directory: "
+                                + partitionPath);
+
+                // Call the private close method with the partition-aware path
+                close(partitionPath);
+            } else {
+                // Use default file creation for unpartitioned tables
+                System.out.println(
+                        "Creating deletion vector file in table root for unpartitioned table");
+                super.close();
+            }
+        }
+
+        /**
+         * Creates a partition-aware path using the table's data directory structure.
+         */
+        private String createPartitionAwarePath(int fileNumber) {
+            // Get the table's data directory
+            URI dataDir = getDataDirectory(id);
+
+            // Create partition directory path (just the partition value, not category=value)
+            URI partitionDir = dataDir.resolve(partitionString + "/");
+
+            // Generate unique filename with counter
+            String filename = String.format("dv-%s-%03d.puffin", partitionString, fileNumber);
+
+            return partitionDir.resolve(filename).toString();
+        }
+
+        // Private method that uses the new close(EncryptedOutputFile) method from BaseDVFileWriter
+        private void close(String customPath) throws IOException {
+            // Create an OutputFile for the custom path
+            OutputFile outputFile = table.io().newOutputFile(customPath);
+
+            // Use EncryptedFiles to create a proper EncryptedOutputFile
+            EncryptedOutputFile encryptedOutputFile = EncryptedFiles.encryptedOutput(outputFile, (byte[]) null);
+
+            System.out.println(
+                    "Calling BaseDVFileWriter.close(EncryptedOutputFile) with custom path: "
+                            + customPath);
+
+            // Use the new close(EncryptedOutputFile) method from your forked dependency
+            close(encryptedOutputFile);
+
+            System.out.println("Successfully used close(EncryptedOutputFile) method");
+        }
     }
 
-    @Override
-    public PositionDeleteIndex apply(String path) {
-      DeleteFile deleteFile = deleteFiles.get(path);
-      if (deleteFile == null) {
-        return null;
-      }
-      return deleteLoader.loadPositionDeletes(ImmutableList.of(deleteFile), path);
+    private static class PreviousDeleteLoader implements Function<String, PositionDeleteIndex> {
+        private final Map<String, DeleteFile> deleteFiles;
+        private final DeleteLoader deleteLoader;
+
+        PreviousDeleteLoader(Table table, Map<String, DeleteFile> deleteFiles) {
+            this.deleteFiles = deleteFiles;
+            this.deleteLoader =
+                    new BaseDeleteLoader(deleteFile -> table.io().newInputFile(deleteFile));
+        }
+
+        @Override
+        public PositionDeleteIndex apply(String path) {
+            DeleteFile deleteFile = deleteFiles.get(path);
+            if (deleteFile == null) {
+                return null;
+            }
+            return deleteLoader.loadPositionDeletes(ImmutableList.of(deleteFile), path);
+        }
     }
-  }
-
-
 }
