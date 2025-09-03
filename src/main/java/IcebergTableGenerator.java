@@ -10,6 +10,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -508,6 +509,67 @@ public class IcebergTableGenerator {
             List<T> partitionValues, Predicate<Record> deletePredicate, List<Integer> equalityIds)
             throws IOException {
         return equalityDelete(partitionValues, deletePredicate, equalityIds, null);
+    }
+
+  public IcebergTableGenerator globalEqualityDelete(
+      Predicate<Record> deletePredicate, List<Integer> equalityIds, Schema newSchema)
+      throws IOException {
+        URI dataDir = getDataDirectory(id);
+        Schema schema = newSchema == null ? table.schema() : newSchema;
+        Expression expr = Expressions.alwaysTrue();
+        CloseableIterable<FileScanTask> scanTasks = table.newScan().filter(expr).planFiles();
+    
+        RowDelta rowDelta = getTransaction().newRowDelta();
+        Map<PartitionKey, List<FileScanTask>> orderedTasks =
+            orderFileScanTasksByPartitionAndPath(scanTasks);
+        OutputFile deleteFile = getUniqueNumberedFilename(dataDir + "/eqdelete-%02d.parquet");
+    
+        List<String> dataFiles = new ArrayList<>();
+        for (PartitionKey key : orderedTasks.keySet()) {
+    
+          List<String> newDataFiles =
+              orderedTasks.get(key).stream()
+                  .map(t -> t.file().location())
+                  .sorted(String::compareTo)
+                  .collect(Collectors.toList());
+          dataFiles.addAll(newDataFiles);
+        }
+    
+        EqualityDeleteWriter<Record> deleteWriter =
+            Parquet.writeDeletes(deleteFile)
+                .createWriterFunc(GenericParquetWriter::buildWriter)
+                .overwrite()
+                .rowSchema(schema)
+                .withSpec(PartitionSpec.unpartitioned())
+                .equalityFieldIds(equalityIds)
+                .setAll(table.properties())
+                .buildEqualityWriter();
+        Set<Record> recordSet = new HashSet<>();
+        try (EqualityDeleteWriter<Record> writer = deleteWriter) {
+          for (String path : dataFiles) {
+            try (CloseableIterable<Record> reader =
+                Parquet.read(table.io().newInputFile(path))
+                    .project(schema)
+                    .reuseContainers()
+                    .createReaderFunc(
+                        fileSchema -> GenericParquetReaders.buildReader(schema, fileSchema))
+                    .build()) {
+              for (Record record : reader) {
+                if (deletePredicate.test(record)) {
+                  if (!recordSet.contains(record)) {
+                      recordSet.add(record);
+                      writer.write(record);
+                  }
+                }
+              }
+            }
+          }
+        }
+    
+        rowDelta.addDeletes(deleteWriter.toDeleteFile());
+    
+        rowDelta.commit();
+        return this;
     }
 
     public <T> IcebergTableGenerator equalityDelete(
