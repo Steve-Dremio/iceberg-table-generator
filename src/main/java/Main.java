@@ -72,6 +72,9 @@ public class Main {
     private static final List<String> PRODUCT_SUFFIXES =
             ImmutableList.of("", "", "Advanced", "1000", "2000", "Deluxe", "Express", "Ultimate");
 
+    private static final List<String> PRODUCT_CATALOG =
+      ImmutableList.of("widget", "gadget", "gizmo");
+
     private static final List<String> COLORS =
             ImmutableList.of(
                     "black", "white", "red", "orange", "yellow", "green", "blue", "purple", "brown",
@@ -149,10 +152,18 @@ public class Main {
         // createDvs();
         // createProductsWithEqDeletesAndPosDeletesSameSequenceNumber();
         // createProductsWithEqDeletesAndOverlappingPosDeletes();
-        createProductsWithDeletionVectorsOnly();
-        createProductsWithDeletionVectorsAndEqualityDeletes();
-        createProductsWithDeletionVectorsAndV2PositionDeletes();
-        createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes();
+        // createProductsWithDeletionVectorsOnly();
+        // createProductsWithDeletionVectorsAndEqualityDeletes();
+        // createProductsWithDeletionVectorsAndV2PositionDeletes();
+//         createProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes();
+        // createUnpartitionedProductsWithPosAndGlobalEqDeletes();
+        // createUnpartitionedProductsWithGlobalEqDeletes();
+        // createUnpartitionedProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes();
+//         createProductsWithGlobalEqDeletesColor();
+        // createPartitionedProductsWithRegularAndGlobalEqDeletes();
+        // createPartitionedProductsWithPositionalAndGlobalEqDeletes();
+//         createProductsWithGlobalEqDeletes();
+         createProductsWithDeletionVectorsGlobalEqualityDeletesAndV2PositionDeletes();
 
         // Test the new partition-aware deletion vectors method
         // testPartitionAwareDeletionVectors();
@@ -762,6 +773,308 @@ public class Main {
         record.set(4, generator.select(PRODUCT_NAMES) + " " + generator.intRange(0, 100));
         record.set(5, generator.doubleRange(0, 100));
         return record;
+    }
+
+    private GenericRecord generateUnpartitionedProductsRecord(ValueGenerator generator, Void unused) {
+        GenericRecord record = GenericRecord.create(PRODUCTS_SCHEMA);
+        int id = generator.id();
+        String name =
+          generator.select(PRODUCT_NAME_TEMPLATES);
+        String suffix = generator.select(PRODUCT_SUFFIXES);
+        if (!suffix.isEmpty()) {
+            name = name + " " + suffix;
+        }
+
+        record.set(0, id);
+        record.set(1, name);
+        record.set(2, generator.select(PRODUCT_CATALOG));
+        record.set(3, COLORS.get(id % COLORS.size()));
+        record.set(4, LocalDate.of(2022 - (id / 12), 12 - (id % 12), 1));
+        record.set(5, generator.doubleRange(0.1, 50.0));
+        record.set(6, generator.intRange(0, 10000));
+        return record;
+    }
+
+    private void createUnpartitionedProductsWithPosAndGlobalEqDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("unpartitioned_products_with_positional_and_equality_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.unpartitioned())
+          // add 400 rows
+          .append(this::generateUnpartitionedProductsRecord, 2, 200)
+          .commit()
+          // positional deletes
+          .positionalDelete(r -> r.get(0, Integer.class) % 10 == 0)
+          .commit()
+          // add 400 rows
+          .append(this::generateUnpartitionedProductsRecord, 2, 200)
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+    }
+
+    private void createUnpartitionedProductsWithGlobalEqDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("unpartitioned_products_with_global_equality_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.unpartitioned())
+          // add 400 rows
+          .append(this::generateUnpartitionedProductsRecord, 2, 200)
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+    }
+
+    private void createUnpartitionedProductsWithDeletionVectorsEqualityDeletesAndV2PositionDeletes()
+      throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath,
+            conf,
+            TableIdentifier.of(
+              "unpartitioned_products_with_deletion_vectors_and_equality_deletes_and_v2_position_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.unpartitioned(),
+            tableProperties)
+          // add 400 rows
+          .append(this::generateUnpartitionedProductsRecord, 2, 200)
+          .commit();
+
+        tableGenerator
+          // delete product_ids [ 0 .. 390 via deletion vector -  40 rows removed
+          .positionalDelete(r -> r.get(0, Integer.class) % 10 == 0)
+          .commit()
+          // add 400 rows
+          .append(this::generateUnpartitionedProductsRecord, 2, 200)
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
+
+        tableGenerator
+          .deletionVectors(
+            null,
+            r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+          .commit();
+    }
+
+    private void createProductsWithGlobalEqDeletesColor() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("partitioned_products_with_global_equality_deletes_single_delete_for_all_partitions"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+            ImmutableMap.of(
+              // Iceberg will write at minimum 100 rows per rowgroup, so set row
+              // group size small
+              // enough to
+              // guarantee that happens
+              TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+
+          // add 200 rows each to widget, gadget, and gizmo partitions
+          .append(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            this::generateProductsRecord,
+            1,
+            200)
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+    }
+
+    private void createPartitionedProductsWithPositionalAndGlobalEqDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("partitioned_products_with_positional_and_global_equality_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+            ImmutableMap.of(
+              // Iceberg will write at minimum 100 rows per rowgroup, so set row
+              // group size small
+              // enough to
+              // guarantee that happens
+              TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+
+          // add 200 rows each to widget, gadget, and gizmo partitions
+          .append(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            this::generateProductsRecord,
+            1,
+            200)
+          .commit()
+          // delete product_ids [ 25 .. 39 via positional delete -  15 rows removed
+          .positionalDelete(
+            ImmutableList.of("widget"),
+            r -> r.get(0, Integer.class) >= 25 && r.get(0, Integer.class) < 40)
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+    }
+
+    private void createPartitionedProductsWithRegularAndGlobalEqDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("partitioned_products_with_regular_and_global_equality_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+            ImmutableMap.of(
+              // Iceberg will write at minimum 100 rows per rowgroup, so set row
+              // group size small
+              // enough to
+              // guarantee that happens
+              TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+
+          // add 200 rows each to widget, gadget, and gizmo partitions
+          .append(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            this::generateProductsRecord,
+            1,
+            200)
+          .commit()
+          // delete product_ids [ 0 .. 29 ] via equality delete - 30 rows removed
+          .equalityDelete(
+            ImmutableList.of("widget"),
+            r -> r.get(0, Integer.class) < 30,
+            equalityIds(PRODUCTS_SCHEMA, "product_id"))
+          .commit()
+          // delete all record with color = gray from all partitions
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+    }
+
+    private void createProductsWithGlobalEqDeletes() throws IOException {
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath, conf, TableIdentifier.of("partitioned_products_with_global_equality_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+            ImmutableMap.of(
+              // Iceberg will write at minimum 100 rows per rowgroup, so set row
+              // group size small
+              // enough to
+              // guarantee that happens
+              TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1)))
+
+          // add 200 rows each to widget, gadget, and gizmo partitions
+          .append(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            this::generateProductsRecord,
+            1,
+            400)
+          .commit()
+          // delete product ids [ 100 .. 199 ], [ 300 .. 399 ], [ 500 .. 599 ], [ 700 .. 799
+          // ], [ 900
+          // .. 999 ]
+          // taking into account previous deletions this deletes 480 rows
+          .globalEqualityDelete(
+            r -> r.get(0, Integer.class) % 200 >= 100,
+            equalityIds(PRODUCTS_SCHEMA, "product_id"), null)
+          .commit();
+    }
+
+    private void createProductsWithDeletionVectorsGlobalEqualityDeletesAndV2PositionDeletes()
+      throws IOException {
+        // Create a properties map with format version 3 for deletion vectors
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put(TableProperties.FORMAT_VERSION, "2");
+        tableProperties.put(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, Integer.toString(1));
+
+        IcebergTableGenerator tableGenerator =
+          new IcebergTableGenerator(
+            warehousePath,
+            conf,
+            TableIdentifier.of(
+              "products_with_deletion_vectors_and_global_equality_deletes_and_v2_position_deletes"));
+        tableGenerator
+          .create(
+            PRODUCTS_SCHEMA,
+            PartitionSpec.builderFor(PRODUCTS_SCHEMA).identity("category").build(),
+            tableProperties)
+          // add 200 rows to widget partition
+          .append(ImmutableList.of("widget"), this::generateProductsRecord, 1, 200)
+          .commit();
+
+        tableGenerator
+          // delete product_ids [ 0 .. 39 via deletion vector -  40 rows removed
+          .positionalDelete(ImmutableList.of("widget"), r -> r.get(0, Integer.class) < 40)
+          .commit();
+
+        tableGenerator
+          .append(ImmutableList.of("gadget"), this::generateProductsRecord, 1, 200)
+          .commit()
+          .globalEqualityDelete(
+            r -> r.get(0, Integer.class) % 200 >= 100,
+            equalityIds(PRODUCTS_SCHEMA, "product_id"), null)
+          .commit()
+          .append(ImmutableList.of("gizmo"), this::generateProductsRecord, 1, 200)
+          .commit()
+          .globalEqualityDelete(
+            r -> r.get(0, String.class).equals("gray"),
+            equalityIds(PRODUCTS_SCHEMA, "color"), new Schema(
+              Types.NestedField.required(4, "color", Types.StringType.get())))
+          .commit();
+
+        // Update to format version 3 to enable deletion vectors
+        tableGenerator.updateTablePropertiesToV3();
+
+        tableGenerator
+          // add 200 rows each to widget, gadget, and gizmo partitions
+          .append(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            this::generateProductsRecord,
+            1,
+            200)
+          .commit()
+          .deletionVectors(
+            ImmutableList.of("widget", "gadget", "gizmo"),
+            r -> r.get(0, Integer.class) % 200 >= 100 && r.get(0, Integer.class) > 400)
+          .commit();
     }
 
     /**
